@@ -355,8 +355,6 @@ void SA(vector<logic_info> &logic_blocks_table,
     double best_cost = cur_cost;
     cout<<"lambda: "<<lambda<<endl;
 
-    int n = logic_blocks_table.size();
-
     // 紀錄最佳解
     auto best_logic_blocks = logic_blocks_table;
     auto best_array2D = array2D;
@@ -371,7 +369,7 @@ void SA(vector<logic_info> &logic_blocks_table,
     double T = 50.0;
     double T_end = 1e-4;
     double alpha = 0.97;
-    int iter_per_T = n*20;
+    int iter_per_T = 2000;
 
     std::uniform_real_distribution<double> dist01(0.0, 1.0);
 
@@ -403,8 +401,8 @@ void SA(vector<logic_info> &logic_blocks_table,
             {
                 // 變爛 → 以 exp(-delta/T) 的機率接受
                 double u = dist01(rng);
-                double delta_norm = delta / (1.0 + fabs(cur_cost));
-                if (u < exp(-delta_norm / T)) accept = true;
+                if (u < exp(-delta / T))
+                    accept = true;
             }
 
             if (accept)
