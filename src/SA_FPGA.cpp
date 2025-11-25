@@ -6,6 +6,7 @@
 #include <math.h>
 #include <random>
 #include <chrono>
+#include <unordered_set>
 
 std::mt19937 rng(123456);
 
@@ -224,12 +225,10 @@ void compute_hpwl_cong(const vector<logic_info> &logic_blocks_table,
 
 double compute_cost(double total_hpwl, double CC, double lambda)
 {
-    const double CC_target = 1.12;              // 你希望的 CC 水準
-    double pen = std::max(0.0, CC - CC_target); // 只罰超過的那一段
-    return total_hpwl + lambda * pen;
+    /*const double CC_target = 1.12;              // 你希望的 CC 水準
+    double pen = std::max(0.0, CC - CC_target); // 只罰超過的那一段*/
+    return total_hpwl * CC;
 }
-
-
 
 change_info random_move(vector<logic_info> &logic_blocks_table, unordered_map<string, int> &name2idx,
                         vector<vector<string>> &array2D,
@@ -348,12 +347,13 @@ void SA(vector<logic_info> &logic_blocks_table,
         double &CC)
 {
     double pen0 = std::max(0.0, CC - 1.0);
-    if (pen0 < 1e-6) pen0 = 1.0;  // 避免除 0
-    double hpwl_order = floor(log10(total_hpwl));
-    double lambda =  0.15 * total_hpwl / pen0;  
+    if (pen0 < 1e-6)
+        pen0 = 1.0; // 避免除 0
+    double lambda = 0.15 * total_hpwl / pen0;
     double cur_cost = compute_cost(total_hpwl, CC, lambda);
     double best_cost = cur_cost;
-    cout<<"lambda: "<<lambda<<endl;
+
+    cout << "lambda: " << lambda << endl;
 
     // 紀錄最佳解
     auto best_logic_blocks = logic_blocks_table;
@@ -367,11 +367,42 @@ void SA(vector<logic_info> &logic_blocks_table,
 
     // SA 參數
     double T = 50.0;
-    double T_end = 1e-4;
-    double alpha = 0.97;
-    int iter_per_T = 2000;
+    double T_end = 1e-5;
+    double alpha = 0.95;
+    int iter_per_T = 5000;
 
     std::uniform_real_distribution<double> dist01(0.0, 1.0);
+
+    // 先從現在的 U 算一次 sumU / sumU2，之後都 incremental 更新
+    const long long N = (long long)R * (long long)C;
+    long long sumU = 0;
+    long long sumU2 = 0;
+    for (int y = 0; y < R; ++y)
+    {
+        for (int x = 0; x < C; ++x)
+        {
+            int v = U[y][x];
+            sumU += v;
+            sumU2 += 1LL * v * v;
+        }
+    }
+
+    // 給 incremental 用的小結構
+    struct NetUpdate
+    {
+        int net_idx;
+        std::string net_name;
+        double old_hpwl;
+        rec old_box;
+        double new_hpwl;
+        rec new_box;
+    };
+
+    struct CellBackup
+    {
+        int x, y;
+        int old_val;
+    };
 
     while (T > T_end)
     {
@@ -381,36 +412,168 @@ void SA(vector<logic_info> &logic_blocks_table,
             change_info chg = random_move(logic_blocks_table, name2idx,
                                           array2D, R, C);
 
-            // 2. 算新解的 HPWL & CC
-            double new_hpwl, new_CC;
-            compute_hpwl_cong(logic_blocks_table, pin_table, net_table,
-                              name2idx, pin2idx,
-                              U, net2hpwl_cong, new_hpwl, new_CC);
+            // 2. 找出受影響的 nets（A、B 兩顆 cell 相關聯的 nets）
+            std::unordered_set<int> affected_net_set;
 
-            double new_cost = compute_cost(new_hpwl, new_CC, lambda);
-            double delta = new_cost - cur_cost;
+            auto collect_nets = [&](const std::string &blk_name)
+            {
+                if (blk_name == "none")
+                    return;
+                auto it_blk = name2idx.find(blk_name);
+                if (it_blk == name2idx.end())
+                    return;
+                const auto &blk = logic_blocks_table[it_blk->second];
+                for (int nid : blk.connect_nets)
+                {
+                    affected_net_set.insert(nid);
+                }
+            };
+
+            collect_nets(chg.nameA);
+            collect_nets(chg.nameB);
+
+            // 3. 只對 affected nets 用 net2hpwl_cong 查舊 hpwl / box，
+            //    然後重新算新的 bbox / hpwl
+            std::vector<NetUpdate> updates;
+            updates.reserve(affected_net_set.size());
+
+            double trial_hpwl = total_hpwl; // 從現在的 total_hpwl 開始加差值
+
+            for (int nid : affected_net_set)
+            {
+                const net_info &net = net_table[nid];
+                const std::string &net_name = net.name;
+
+                // 從 net2hpwl_cong 查舊 hpwl / box
+                auto it_info = net2hpwl_cong.find(net_name);
+                double old_hp = 0.0;
+                rec old_rect{};
+                if (it_info != net2hpwl_cong.end())
+                {
+                    old_hp = (double)it_info->second.hpwl;
+                    old_rect = it_info->second.box;
+                }
+
+                // 用目前 (已 move) 的 logic_blocks_table/pin_table/name2idx/pin2idx
+                // 重新算 bbox
+                rec new_rect = calculate_bounding_box(net,
+                                                      logic_blocks_table,
+                                                      pin_table,
+                                                      name2idx,
+                                                      pin2idx);
+                double new_hp = (new_rect.xmax - new_rect.xmin) +
+                                (new_rect.ymax - new_rect.ymin);
+
+                trial_hpwl += (new_hp - old_hp);
+
+                NetUpdate nu;
+                nu.net_idx = nid;
+                nu.net_name = net_name;
+                nu.old_hpwl = old_hp;
+                nu.old_box = old_rect;
+                nu.new_hpwl = new_hp;
+                nu.new_box = new_rect;
+                updates.push_back(nu);
+            }
+
+            // 4. 對 U 做「暫時性的」更新，順便算 new_sumU / new_sumU2
+            long long new_sumU = sumU;
+            long long new_sumU2 = sumU2;
+
+            std::vector<CellBackup> cell_backups;
+            cell_backups.reserve(256);
+            std::unordered_map<long long, int> visited; // key: (y<<32)|x -> index in backups
+
+            auto apply_rect_delta = [&](const rec &box, int delta)
+            {
+                int x_start = std::max(0, (int)floor((double)box.xmin));
+                int x_end = std::min(C, (int)ceil((double)box.xmax)); // [x_start, x_end)
+                int y_start = std::max(0, (int)floor((double)box.ymin));
+                int y_end = std::min(R, (int)ceil((double)box.ymax)); // [y_start, y_end)
+
+                for (int y = y_start; y < y_end; ++y)
+                {
+                    for (int x = x_start; x < x_end; ++x)
+                    {
+                        long long key = ((long long)y << 32) | (unsigned int)x;
+                        int idx_bk;
+                        auto itv = visited.find(key);
+                        if (itv == visited.end())
+                        {
+                            CellBackup bk{x, y, U[y][x]};
+                            cell_backups.push_back(bk);
+                            idx_bk = (int)cell_backups.size() - 1;
+                            visited[key] = idx_bk;
+                        }
+                        else
+                        {
+                            idx_bk = itv->second;
+                        }
+
+                        int old_v = U[y][x];
+                        int new_v = old_v + delta;
+                        U[y][x] = new_v;
+
+                        new_sumU += delta;
+                        new_sumU2 += 1LL * new_v * new_v - 1LL * old_v * old_v;
+                    }
+                }
+            };
+
+            // 用 net2hpwl_cong 的舊 box 先 -1，再用新 box +1
+            for (const auto &u : updates)
+            {
+                if (u.old_hpwl > 0.0)
+                {
+                    apply_rect_delta(u.old_box, -1);
+                }
+                apply_rect_delta(u.new_box, +1);
+            }
+
+            // 用更新後的 U 統計值得到 new_CC
+            double new_CC;
+            if (new_sumU == 0)
+            {
+                new_CC = 1.0;
+            }
+            else
+            {
+                new_CC = (double)N * (double)new_sumU2 /
+                         ((double)new_sumU * (double)new_sumU);
+            }
+
+            double new_cost = compute_cost(trial_hpwl, new_CC, lambda);
+            double delta_cost = new_cost - cur_cost;
             bool accept = false;
 
-            // 3. 決定要不要接受
-            if (delta <= 0)
+            // 5. SA 接受規則
+            if (delta_cost <= 0)
             {
-                // 變好 → 一定接受
                 accept = true;
             }
             else
             {
-                // 變爛 → 以 exp(-delta/T) 的機率接受
                 double u = dist01(rng);
-                if (u < exp(-delta / T))
+                if (u < exp(-delta_cost / T))
                     accept = true;
             }
 
             if (accept)
             {
-                // 接受新解
+                // 6. 接受：commit incremental 更新
                 cur_cost = new_cost;
-                total_hpwl = new_hpwl;
+                total_hpwl = trial_hpwl;
                 CC = new_CC;
+                sumU = new_sumU;
+                sumU2 = new_sumU2;
+
+                // 用 net2hpwl_cong 更新 affected nets 的 hpwl / box
+                for (const auto &u : updates)
+                {
+                    auto &info = net2hpwl_cong[u.net_name];
+                    info.hpwl = (int)u.new_hpwl;
+                    info.box = u.new_box;
+                }
 
                 // 更新 best solution
                 if (cur_cost < best_cost)
@@ -424,8 +587,13 @@ void SA(vector<logic_info> &logic_blocks_table,
             }
             else
             {
-                // 不接受 → 把剛剛那個 move 還原
+                // 7. 不接受：把 U 還原，位置用 undo_move 拉回
+                for (const auto &bk : cell_backups)
+                {
+                    U[bk.y][bk.x] = bk.old_val;
+                }
                 undo_move(logic_blocks_table, name2idx, array2D, chg);
+                // total_hpwl / CC / sumU / sumU2 / net2hpwl_cong 都維持舊的
             }
         }
 
@@ -443,7 +611,7 @@ void SA(vector<logic_info> &logic_blocks_table,
     total_hpwl = best_hpwl;
     CC = best_CC;
 
-    // 再算一次 HPWL / CC，順便更新 net2hpwl_cong, U
+    // 最後再 full recompute 一次，讓 net2hpwl_cong / U 對應到 best solution
     compute_hpwl_cong(logic_blocks_table, pin_table, net_table,
                       name2idx, pin2idx,
                       U, net2hpwl_cong, total_hpwl, CC);
