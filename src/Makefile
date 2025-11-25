@@ -19,6 +19,8 @@ run1: $(TARGET)
 	./$(TARGET) ../testcases/alu4.txt ../output/alu4output.txt
 run5:
 	./$(TARGET) ../testcases/pdc.txt ../output/pdcoutput.txt
+run6:
+	./$(TARGET) ../testcases/pdc_20000.txt ../output/pdc_20000_output.txt
 
 # 清除編譯產物
 clean:

@@ -7,6 +7,8 @@
 #include <random>
 #include <chrono>
 #include <unordered_set>
+#include <algorithm>
+#include <climits>
 
 std::mt19937 rng(123456);
 
@@ -54,20 +56,59 @@ struct change_info
     int Ax, Ay;
     int Bx, By;
 };
+// 給 incremental 用的小結構
+struct NetUpdate
+{
+    int net_idx;
+    std::string net_name;
+    double old_hpwl;
+    rec old_box;
+    double new_hpwl;
+    rec new_box;
+};
+
+struct CellBackup
+{
+    int x, y;
+    int old_val;
+};
 
 void initial_place(vector<vector<string>> &array2D, int R, int C, vector<logic_info> &logic_blocks_table)
 {
-    int idx = 0;
-    for (int i = 0; i < R && idx < (int)logic_blocks_table.size(); i++)
+    int N = (int)logic_blocks_table.size();
+
+    // 1. 蒐集所有 grid 位置
+    vector<pair<int,int>> cells;
+    cells.reserve((size_t)R * (size_t)C);
+    for (int i = 0; i < R; ++i)
     {
-        for (int j = 0; j < C && idx < (int)logic_blocks_table.size(); j++)
+        for (int j = 0; j < C; ++j)
         {
-            array2D[i][j] = logic_blocks_table[idx].name;
-            logic_blocks_table[idx].x = i;
-            logic_blocks_table[idx].y = j;
-            idx++;
+            cells.emplace_back(i, j);
         }
     }
+
+    // 2. 隨機打亂 cells
+    std::random_device rd;
+    unsigned seed = rd();
+    std::mt19937 gen(3241967259);
+    std::shuffle(cells.begin(), cells.end(), gen);
+
+    // 3. 把前 N 個 cells 分配給 logic blocks（如果 N > R*C，就只放得下 R*C 個）
+    int max_place = std::min(N, (int)cells.size());
+
+    for (int idx = 0; idx < max_place; ++idx)
+    {
+        int i = cells[idx].first;
+        int j = cells[idx].second;
+
+        array2D[i][j] = logic_blocks_table[idx].name;
+        logic_blocks_table[idx].x = i;  // 如果你原本是 x=row, y=col，就維持這樣
+        logic_blocks_table[idx].y = j;
+    }
+
+    // 如果 logic_blocks_table.size() > R*C，多出來的 block 就暫時沒位置
+    // 你可以視需要在這裡處理沒放到的情況
 }
 
 rec calculate_bounding_box(const net_info &net,
@@ -346,15 +387,13 @@ void SA(vector<logic_info> &logic_blocks_table,
         double &total_hpwl,
         double &CC)
 {
+    auto start_SA = Clock::now();
     double pen0 = std::max(0.0, CC - 1.0);
     if (pen0 < 1e-6)
         pen0 = 1.0; // 避免除 0
     double lambda = 0.15 * total_hpwl / pen0;
     double cur_cost = compute_cost(total_hpwl, CC, lambda);
     double best_cost = cur_cost;
-
-    cout << "lambda: " << lambda << endl;
-
     // 紀錄最佳解
     auto best_logic_blocks = logic_blocks_table;
     auto best_array2D = array2D;
@@ -366,8 +405,8 @@ void SA(vector<logic_info> &logic_blocks_table,
          << " cost=" << cur_cost << endl;
 
     // SA 參數
-    double T = 50.0;
-    double T_end = 1e-5;
+    double T = 40.0;
+    double T_end = 0.0001;
     double alpha = 0.95;
     int iter_per_T = 5000;
 
@@ -387,25 +426,13 @@ void SA(vector<logic_info> &logic_blocks_table,
         }
     }
 
-    // 給 incremental 用的小結構
-    struct NetUpdate
-    {
-        int net_idx;
-        std::string net_name;
-        double old_hpwl;
-        rec old_box;
-        double new_hpwl;
-        rec new_box;
-    };
-
-    struct CellBackup
-    {
-        int x, y;
-        int old_val;
-    };
-
     while (T > T_end)
     {
+        auto ending = Clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(ending - start_SA);
+        if(duration.count()>220000){
+            break;
+        }
         for (int it = 0; it < iter_per_T; ++it)
         {
             // 1. 做一個 random move（可能 block<->block 或 block<->空格）
@@ -622,8 +649,7 @@ void SA(vector<logic_info> &logic_blocks_table,
          << " cost=" << best_cost << endl;
 }
 
-void parse_input(ifstream &parse, vector<logic_info> &logic_blocks_table, vector<pin_info> &pin_table,
-                 vector<net_info> &net_table, unordered_map<string, int> &name2idx, unordered_map<string, int> &pin2idx, unordered_map<string, int> &net2idx)
+void parse_input(ifstream &parse, vector<logic_info> &logic_blocks_table, vector<pin_info> &pin_table, vector<net_info> &net_table, unordered_map<string, int> &name2idx, unordered_map<string, int> &pin2idx, unordered_map<string, int> &net2idx)
 {
     string line;
     getline(parse, line);
@@ -684,7 +710,6 @@ void parse_input(ifstream &parse, vector<logic_info> &logic_blocks_table, vector
         net2idx.insert({name, i});
     }
 }
-
 void print_logic_blocks(const vector<logic_info> &logic_blocks_table)
 {
     cout << "=== Logic Blocks ===\n";
@@ -707,7 +732,6 @@ void print_logic_blocks(const vector<logic_info> &logic_blocks_table)
     }
     cout << endl;
 }
-
 void print_pins(const vector<pin_info> &pin_table)
 {
     cout << "=== IO Pins ===\n";
@@ -737,7 +761,6 @@ void print_nets(const vector<net_info> &net_table)
     }
     cout << endl;
 }
-
 void print_net2hpwl_cong(const unordered_map<string, net_hpwl_cong> &net2hpwl_cong)
 {
     cout << "=== net2hpwl_cong ===\n";
@@ -760,7 +783,6 @@ void print_net2hpwl_cong(const unordered_map<string, net_hpwl_cong> &net2hpwl_co
     cout << count << endl;
     cout << endl;
 }
-
 void print_U(const vector<vector<int>> &U)
 {
     cout << "=== U congestion map ===\n";
@@ -774,7 +796,6 @@ void print_U(const vector<vector<int>> &U)
     }
     cout << endl;
 }
-
 void print_array2D(const vector<vector<string>> &array2D)
 {
     cout << "=== array2D placement ===\n";
@@ -788,9 +809,7 @@ void print_array2D(const vector<vector<string>> &array2D)
     }
     cout << endl;
 }
-
-void write_output(const string &out_file,
-                  const vector<logic_info> &logic_blocks_table)
+void write_output(const string &out_file, const vector<logic_info> &logic_blocks_table)
 {
     ofstream fout(out_file);
     if (!fout)
@@ -832,6 +851,31 @@ int main(int argc, char *argv[])
     parse_input(parse_in, logic_blocks_table, pin_table, net_table, name2idx, pin2idx, net2idx);
     vector<vector<string>> array2D(R, vector<string>(C, "none"));
     vector<vector<int>> U(R, vector<int>(C, 0));
+    /*int i=0;
+    double min = INT_MAX;
+    double temph;
+        double tempcc;
+        double tempc;
+        unsigned ss;
+    while(i<100000){
+        unsigned xx = initial_place(array2D, R, C, logic_blocks_table);
+        compute_hpwl_cong(logic_blocks_table, pin_table, net_table, name2idx, pin2idx, U, net2hpwl_cong, total_hpwl, CC);
+        double x = compute_cost(total_hpwl,CC,0);
+        if(x<min ){
+            min = x;
+            temph = total_hpwl;
+            tempcc = CC;
+            tempc = x;
+            ss = xx;
+        }
+        cout << "[INIT] HPWL=" << total_hpwl
+         << " CC=" << CC << "Cost: "<<x<<"Seed: "<<xx<<endl;
+        cout<<i<<endl;
+         i++;
+    }
+      cout << "[MIN] HPWL=" << temph
+         << " CC=" << tempcc << "Cost: "<<tempc<<"Seed: "<<ss<<endl;
+         i++;*/
     initial_place(array2D, R, C, logic_blocks_table);
     // print_array2D(array2D);
     //  Optional: print parsed data for verification
