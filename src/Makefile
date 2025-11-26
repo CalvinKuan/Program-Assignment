@@ -17,6 +17,8 @@ $(TARGET): $(SRC)
 # 方便測試用：make run IN=input.txt OUT=out.txt
 run1: $(TARGET)
 	./$(TARGET) ../testcases/alu4.txt ../output/alu4output.txt
+run4:
+	./$(TARGET) ../testcases/clma_2.txt ../output/clmaoutput.txt
 run5:
 	./$(TARGET) ../testcases/pdc.txt ../output/pdcoutput.txt
 run6:
@@ -25,3 +27,4 @@ run6:
 # 清除編譯產物
 clean:
 	rm -f $(TARGET)
+
