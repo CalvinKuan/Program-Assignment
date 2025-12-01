@@ -41,7 +41,6 @@ struct rec
     double ymin;
 };
 
-// net 端點：是 block 還是 pin
 struct NetTerm
 {
     bool is_pin; // false => logic block, true => IO pin
@@ -52,8 +51,8 @@ struct net_info
 {
     string name;
     int degree;
-    vector<string> connections;  // 原始名稱（保留給 debug）
-    vector<NetTerm> terms;       // 給 HPWL 用，不再查 hash
+    vector<string> connections;
+    vector<NetTerm> terms;
 };
 
 struct net_hpwl_cong
@@ -69,42 +68,29 @@ struct change_info
     int Bx, By;
 };
 
-// 給 incremental 用的小結構
-struct NetUpdate
+struct OptimalRegion
 {
-    int net_idx;
-    std::string net_name;
-    double old_hpwl;
-    rec old_box;
-    double new_hpwl;
-    rec new_box;
-};
-
-struct CellBackup
-{
-    int x, y;
-    int old_val;
+    int lx, ly;
+    int ux, uy;
 };
 
 void initial_place(vector<vector<string>> &array2D, int R, int C,
                    vector<logic_info> &logic_blocks_table)
 {
     int N = (int)logic_blocks_table.size();
-
     int idx = 0;
     for (int i = 0; i < R && idx < N; ++i)
     {
         for (int j = 0; j < C && idx < N; ++j)
         {
             array2D[i][j] = logic_blocks_table[idx].name;
-            logic_blocks_table[idx].x = i;  // x = row
-            logic_blocks_table[idx].y = j;  // y = col
+            logic_blocks_table[idx].x = i;
+            logic_blocks_table[idx].y = j;
             ++idx;
         }
     }
 }
 
-// 新版：不再查 name2idx/pin2idx，只看 net.terms
 rec calculate_bounding_box(const net_info &net,
                            const vector<logic_info> &logic_blocks_table,
                            const vector<pin_info> &pin_table)
@@ -120,7 +106,6 @@ rec calculate_bounding_box(const net_info &net,
 
         if (!term.is_pin)
         {
-            // movable block
             const auto &blk = logic_blocks_table[term.idx];
             double xb = (double)blk.x;
             double yb = (double)blk.y;
@@ -131,7 +116,6 @@ rec calculate_bounding_box(const net_info &net,
         }
         else
         {
-            // fixed pin
             const auto &p = pin_table[term.idx];
             double xp = p.x;
             double yp = p.y;
@@ -143,10 +127,8 @@ rec calculate_bounding_box(const net_info &net,
 
         if (first)
         {
-            xmin = this_xmin;
-            xmax = this_xmax;
-            ymin = this_ymin;
-            ymax = this_ymax;
+            xmin = this_xmin; xmax = this_xmax;
+            ymin = this_ymin; ymax = this_ymax;
             first = false;
         }
         else
@@ -164,11 +146,8 @@ rec calculate_bounding_box(const net_info &net,
         Rect.xmin = Rect.xmax = Rect.ymin = Rect.ymax = 0.0;
         return Rect;
     }
-
-    Rect.xmin = xmin;
-    Rect.xmax = xmax;
-    Rect.ymin = ymin;
-    Rect.ymax = ymax;
+    Rect.xmin = xmin; Rect.xmax = xmax;
+    Rect.ymin = ymin; Rect.ymax = ymax;
     return Rect;
 }
 
@@ -176,15 +155,12 @@ void compute_hpwl_cong(const vector<logic_info> &logic_blocks_table,
                        const vector<pin_info> &pin_table,
                        const vector<net_info> &net_table,
                        vector<vector<int>> &U,
-                       unordered_map<string, net_hpwl_cong> &net2hpwl_cong,
+                       vector<net_hpwl_cong> &net_cost,
                        double &total_hpwl,
                        double &CC)
 {
-    // 初始化 coverage
     for (int y = 0; y < R; ++y)
-    {
         fill(U[y].begin(), U[y].end(), 0);
-    }
 
     total_hpwl = 0.0;
 
@@ -195,14 +171,13 @@ void compute_hpwl_cong(const vector<logic_info> &logic_blocks_table,
         double hpwl = (box.xmax - box.xmin) + (box.ymax - box.ymin);
         total_hpwl += hpwl;
 
-        net_hpwl_cong &info = net2hpwl_cong[net.name];
-        info.hpwl = hpwl;
-        info.box = box;
+        net_cost[i].hpwl = hpwl;
+        net_cost[i].box  = box;
 
         int x_start = max(0, (int)floor(box.xmin));
-        int x_end   = min(C, (int)ceil(box.xmax)); // [x_start, x_end)
+        int x_end   = min(C, (int)ceil(box.xmax));
         int y_start = max(0, (int)floor(box.ymin));
-        int y_end   = min(R, (int)ceil(box.ymax)); // [y_start, y_end)
+        int y_end   = min(R, (int)ceil(box.ymax));
 
         for (int y = y_start; y < y_end; ++y)
         {
@@ -213,7 +188,6 @@ void compute_hpwl_cong(const vector<logic_info> &logic_blocks_table,
         }
     }
 
-    // 計算 CC
     long long N = (long long)R * (long long)C;
     long long sumU = 0;
     long long sumU2 = 0;
@@ -227,20 +201,17 @@ void compute_hpwl_cong(const vector<logic_info> &logic_blocks_table,
         }
     }
 
-    if (sumU == 0)
-    {
-        CC = 1.0; // 沒有任何 net 覆蓋時，視為完美均勻
-    }
-    else
-    {
-        CC = (double)N * (double)sumU2 / ((double)sumU * (double)sumU);
-    }
+    if (sumU == 0) CC = 1.0;
+    else CC = (double)N * (double)sumU2 / ((double)sumU * (double)sumU);
 }
 
-double compute_cost(double total_hpwl, double CC, double /*lambda*/)
+double compute_cost(double total_hpwl, double CC, double lambda)
 {
-    // 目前直接用 total_hpwl * CC
-    return total_hpwl * CC;
+    if(CC <1.04){
+        return total_hpwl*1.04;
+    }
+    (void)lambda;               // 目前先不用 lambda，保留參數以後好調
+    return total_hpwl * CC;     // 作業指定：HPWL * CC
 }
 
 void undo_move(vector<logic_info> &logic_blocks_table,
@@ -248,207 +219,188 @@ void undo_move(vector<logic_info> &logic_blocks_table,
                vector<vector<string>> &array2D,
                const change_info &chg)
 {
-    // 還原 A
     int idxA = name2idx[chg.nameA];
     auto &A = logic_blocks_table[idxA];
 
     if (chg.nameB != "none")
     {
-        // block <-> block 的情況
         int idxB = name2idx[chg.nameB];
         auto &B = logic_blocks_table[idxB];
-
-        A.x = chg.Ax;
-        A.y = chg.Ay;
-        B.x = chg.Bx;
-        B.y = chg.By;
-
+        A.x = chg.Ax; A.y = chg.Ay;
+        B.x = chg.Bx; B.y = chg.By;
         array2D[chg.Ax][chg.Ay] = chg.nameA;
         array2D[chg.Bx][chg.By] = chg.nameB;
     }
     else
     {
-        // block <-> 空格 的情況
-        A.x = chg.Ax;
-        A.y = chg.Ay;
-
+        A.x = chg.Ax; A.y = chg.Ay;
         array2D[chg.Ax][chg.Ay] = chg.nameA;
         array2D[chg.Bx][chg.By] = "none";
     }
 }
 
-// ========= Optimal Region 版 random move =========
-change_info random_move_optimal(vector<logic_info> &logic_blocks_table,
-                                unordered_map<string, int> &name2idx,
-                                vector<vector<string>> &array2D,
-                                int R, int C,
-                                const vector<net_info> &net_table,
-                                const unordered_map<string, net_hpwl_cong> &net2hpwl_cong)
+OptimalRegion compute_optimal_region_for_block(
+    const logic_info &blk,
+    const vector<logic_info> &logic_blocks_table,
+    const vector<net_info> &net_table,
+    const vector<pin_info> &pin_table,
+    const vector<net_hpwl_cong> &net_cost,
+    double scale)
 {
-    int n = (int)logic_blocks_table.size();
-    std::uniform_int_distribution<int> dist_block(0, n - 1);
-    change_info changes;
+    (void)logic_blocks_table;
+    (void)pin_table;
 
-    // 1. 隨機選一個 block A
-    int idx = dist_block(rng);
-    auto &A = logic_blocks_table[idx];
-    int Ax = A.x;
-    int Ay = A.y;
-
-    int Bx, By;
-
-    // 2. 依據 A 連到的 nets 算「目標區域」中心點
-    double cx_sum = 0.0, cy_sum = 0.0;
+    double sum_cx = 0.0;
+    double sum_cy = 0.0;
     int cnt = 0;
 
-    for (int nid : A.connect_nets)
+    for (int nid : blk.connect_nets)
     {
-        const net_info &net = net_table[nid];
-        auto it_info = net2hpwl_cong.find(net.name);
-        if (it_info == net2hpwl_cong.end()) continue;
+        const rec &box = net_cost[nid].box;
+        if (box.xmax <= box.xmin && box.ymax <= box.ymin) continue;
 
-        const rec &b = it_info->second.box;
-        double cx = 0.5 * (b.xmin + b.xmax);
-        double cy = 0.5 * (b.ymin + b.ymax);
-        cx_sum += cx;
-        cy_sum += cy;
+        double cx = 0.5 * (box.xmin + box.xmax);
+        double cy = 0.5 * (box.ymin + box.ymax);
+        sum_cx += cx;
+        sum_cy += cy;
         cnt++;
     }
 
-    bool use_region = (cnt > 0);
-
-    if (use_region)
+    OptimalRegion region;
+    if (cnt == 0)
     {
-        double cx = cx_sum / (double)cnt;
-        double cy = cy_sum / (double)cnt;
-
-        // 在 net 中心附近開一個 window 當 optimal region
-        int half_range_r = std::max(2, R / 10); // row 方向
-        int half_range_c = std::max(2, C / 10); // col 方向
-
-        int r_min = std::max(0, (int)floor(cx - half_range_r));
-        int r_max = std::min(R - 1, (int)ceil (cx + half_range_r));
-        int c_min = std::max(0, (int)floor(cy - half_range_c));
-        int c_max = std::min(C - 1, (int)ceil (cy + half_range_c));
-
-        if (r_min > r_max || c_min > c_max)
-        {
-            use_region = false; // 算壞掉就用全域隨機
-        }
-        else
-        {
-            std::uniform_int_distribution<int> distR(r_min, r_max);
-            std::uniform_int_distribution<int> distC(c_min, c_max);
-
-            Bx = distR(rng);
-            By = distC(rng);
-
-            // 萬一 region 只有自己那一格，就 fallback
-            if (Bx == Ax && By == Ay)
-            {
-                use_region = false;
-            }
-        }
+        region.lx = 0; region.ly = 0;
+        region.ux = max(0, R - 1); region.uy = max(0, C - 1);
+        return region;
     }
 
-    // 3. 如果沒辦法用 optimal region，就回到原本「整張板子亂丟」
-    if (!use_region)
-    {
-        std::uniform_int_distribution<int> distR(0, R - 1);
-        std::uniform_int_distribution<int> distC(0, C - 1);
-        Bx = distR(rng);
-        By = distC(rng);
-        while (Bx == Ax && By == Ay)
-        {
-            Bx = distR(rng);
-            By = distC(rng);
-        }
-    }
+    double mx = sum_cx / cnt;
+    double my = sum_cy / cnt;
 
-    // 4. 做 swap / move
-    string swap_target = array2D[Bx][By];
-    string temp;
+    int center_x = (int)std::round(mx);
+    int center_y = (int)std::round(my);
+    center_x = std::max(0, std::min(R - 1, center_x));
+    center_y = std::max(0, std::min(C - 1, center_y));
 
-    if (swap_target != "none")
-    {
-        // block <-> block
-        int idxB = name2idx.at(swap_target);
-        auto &B = logic_blocks_table[idxB];
-        temp = B.name;
+    int base_w = std::max(1, R / 10);
+    int base_h = std::max(1, C / 10);
 
-        A.x = Bx; A.y = By;
-        B.x = Ax; B.y = Ay;
+    int half_w = std::max(2, (int)(base_w * scale));
+    int half_h = std::max(2, (int)(base_h * scale));
 
-        array2D[Ax][Ay] = swap_target;
-        array2D[Bx][By] = A.name;
-    }
-    else
-    {
-        // block <-> 空格
-        A.x = Bx;
-        A.y = By;
-        temp = "none";
+    region.lx = std::max(0, center_x - half_w);
+    region.ux = std::min(R - 1, center_x + half_w);
+    region.ly = std::max(0, center_y - half_h);
+    region.uy = std::min(C - 1, center_y + half_h);
 
-        array2D[Bx][By] = A.name;
-        array2D[Ax][Ay] = "none";
-    }
-
-    changes.nameA = A.name;
-    changes.Ax = Ax;
-    changes.Ay = Ay;
-    changes.nameB = temp;
-    changes.Bx = Bx;
-    changes.By = By;
-    return changes;
+    return region;
 }
 
-// =================================================
+// 取樣幾個 swap 估 T0（比較接近工業版作法）
+double EstimateInitialTemperature(const vector<logic_info> &logic_blocks_table,
+                                  const vector<pin_info> &pin_table,
+                                  const vector<net_info> &net_table,
+                                  double total_hpwl,
+                                  double CC,
+                                  double lambda)
+{
+    double base_cost = compute_cost(total_hpwl, CC, lambda);
+    int num_cells = (int)logic_blocks_table.size();
+    if (num_cells <= 1) return 1.0;
+
+    // 複製一份 blocks 用來做暫時測試
+    vector<logic_info> tmp_blocks = logic_blocks_table;
+    vector<vector<int>> tmpU(R, vector<int>(C, 0));
+    vector<net_hpwl_cong> tmp_net_cost(net_table.size());
+
+    std::uniform_int_distribution<int> dist_block(0, num_cells - 1);
+    int num_samples = min(60, num_cells * 2);
+
+    double sum_pos_delta = 0.0;
+    int    cnt_pos       = 0;
+
+    for (int s = 0; s < num_samples; ++s)
+    {
+        int a = dist_block(rng);
+        int b = dist_block(rng);
+        if (a == b) continue;
+
+        swap(tmp_blocks[a].x, tmp_blocks[b].x);
+        swap(tmp_blocks[a].y, tmp_blocks[b].y);
+
+        double t_hpwl = 0.0, t_CC = 1.0;
+        compute_hpwl_cong(tmp_blocks, pin_table, net_table, tmpU, tmp_net_cost, t_hpwl, t_CC);
+        double new_cost = compute_cost(t_hpwl, t_CC, lambda);
+        double delta = new_cost - base_cost;
+        if (delta > 0.0)
+        {
+            sum_pos_delta += delta;
+            cnt_pos++;
+        }
+
+        // swap back
+        swap(tmp_blocks[a].x, tmp_blocks[b].x);
+        swap(tmp_blocks[a].y, tmp_blocks[b].y);
+    }
+
+    if (cnt_pos == 0) return max(1.0, base_cost * 0.01);
+
+    double avg_pos_delta = sum_pos_delta / (double)cnt_pos;
+    double p0 = 0.8;
+    double T0 = -avg_pos_delta / std::log(p0);
+    if (T0 <= 0.0) T0 = max(1.0, base_cost * 0.01);
+    return T0;
+}
+
+// 在 U 上套用一個 bbox 的 delta（+1 或 -1），並更新 sumU / sumU2
+static inline void apply_rect_delta_on_U(const rec &box,
+                                         int delta,
+                                         vector<vector<int>> &U,
+                                         long long &sumU,
+                                         long long &sumU2)
+{
+    int x_start = max(0, (int)floor(box.xmin));
+    int x_end   = min(C, (int)ceil(box.xmax));
+    int y_start = max(0, (int)floor(box.ymin));
+    int y_end   = min(R, (int)ceil(box.ymax));
+
+    if (x_start >= x_end || y_start >= y_end) return;
+
+    for (int y = y_start; y < y_end; ++y)
+    {
+        for (int x = x_start; x < x_end; ++x)
+        {
+            int old_v = U[y][x];
+            int new_v = old_v + delta;
+            U[y][x] = new_v;
+            sumU  += (new_v - old_v);
+            sumU2 += 1LL * new_v * new_v - 1LL * old_v * old_v;
+        }
+    }
+}
 
 void SA(vector<logic_info> &logic_blocks_table,
         vector<vector<string>> &array2D,
         vector<pin_info> &pin_table,
         vector<net_info> &net_table,
         unordered_map<string, int> &name2idx,
-        unordered_map<string, int> &pin2idx, // 保留參數（雖然目前 bbox 不再用）
-        unordered_map<string, net_hpwl_cong> &net2hpwl_cong,
+        unordered_map<string, int> &pin2idx,
+        vector<net_hpwl_cong> &net_cost,
         vector<vector<int>> &U,
         double &total_hpwl,
         double &CC)
 {
+    (void)pin2idx;
+
     auto start_SA = Clock::now();
-    const int TIME_LIMIT_MS = 220000; // 仍然保留 220 秒安全網
+    const int TIME_LIMIT_MS = 225000;
 
     int num_cells = (int)logic_blocks_table.size();
-    int num_nets  = (int)net_table.size();
+    if (num_cells == 0) return;
 
-    double pen0 = std::max(0.0, CC - 1.0);
-    if (pen0 < 1e-6)
-        pen0 = 1.0; // 避免除 0
-    double lambda = 0.15 * total_hpwl / pen0;
-    double cur_cost = compute_cost(total_hpwl, CC, lambda);
-    double best_cost = cur_cost;
-    // 紀錄最佳解
-    auto best_logic_blocks = logic_blocks_table;
-    auto best_array2D = array2D;
-    double best_hpwl = total_hpwl;
-    double best_CC = CC;
+    double lambda = 3.0;
 
-    cerr << "[INIT] HPWL=" << total_hpwl
-         << " CC=" << CC
-         << " cost=" << cur_cost << endl;
-
-    // ===== SA 參數 (調過版) =====
-    double T      = 500.0;
-    double T_end  = 0.0001;
-    double alpha  = 0.95;
-
-    // 根據 problem size 自動調迭代次數
-    int base_iter = std::max(2000, std::min(num_cells * 2, 20000));
-
-    std::uniform_real_distribution<double> dist01(0.0, 1.0);
-
-    // 先從現在的 U 算一次 sumU / sumU2，之後都 incremental 更新
-    const long long N = (long long)R * (long long)C;
+    // 先把 sumU / sumU2 算出來
     long long sumU = 0;
     long long sumU2 = 0;
     for (int y = 0; y < R; ++y)
@@ -460,51 +412,77 @@ void SA(vector<logic_info> &logic_blocks_table,
             sumU2 += 1LL * v * v;
         }
     }
+    long long Nsite = (long long)R * (long long)C;
 
-    // 使用一維 visit_tag 陣列取代 unordered_map visited（U 還原用）
-    const int cellN = R * C;
-    std::vector<int> visit_tag(cellN, 0);
-    int cur_tag = 0;
+    double cur_cost = compute_cost(total_hpwl, CC, lambda);
+    double best_cost = cur_cost;
+    auto best_logic_blocks = logic_blocks_table;
+    auto best_array2D = array2D;
+    double best_hpwl = total_hpwl;
+    double best_CC = CC;
 
-    // net_mark 陣列取代 unordered_set affected_net_set
+    cerr << "[INIT] HPWL=" << total_hpwl
+         << " CC=" << CC
+         << " cost=" << cur_cost << endl;
+
+    double T = EstimateInitialTemperature(logic_blocks_table, pin_table, net_table,
+                                          total_hpwl, CC, lambda);
+    double initial_T = T;
+    double T_end  = 1e-5;
+
+    int base_iter;
+    if (num_cells < 3000)
+    {
+        base_iter = std::max(8000, std::min(num_cells * 40, 80000));
+    }
+    else if (num_cells < 8000)
+    {
+        base_iter = std::min(num_cells * 30, 100000);
+    }
+    else
+    {
+        base_iter = 50000;
+    }
+    int iter_per_T = base_iter;
+
+    std::uniform_real_distribution<double> dist01(0.0, 1.0);
+    std::uniform_int_distribution<int> dist_block(0, num_cells - 1);
+    std::uniform_int_distribution<int> distR(0, R - 1);
+    std::uniform_int_distribution<int> distC(0, C - 1);
+
     int netN = (int)net_table.size();
     std::vector<int> net_mark(netN, 0);
     int net_tag = 0;
 
-    // 早停控制：連續幾個溫度沒有明顯改善就停
-    int    stall_temps     = 0;
-    double last_best_cost  = best_cost;
-    const  double IMPROVE_EPS = 1e-3;  // 視為有改善的 threshold
-    const  int    STALL_LIMIT = 20;    // 連續 20 個溫度沒進步就停
+    double current_region_prob = 0.3;
+    const double max_region_prob = 0.95;
+    const double min_region_prob = 0.05;
+    const double prob_step_up   = 0.02;
+    const double prob_step_down = 0.02;
+
+    int round_cnt = 0;
+    int low_acc_rounds = 0;
+
+    cerr << "[SA] Estimated T0 = " << T << " Iter/T = " << iter_per_T << endl;
 
     while (T > T_end)
     {
         auto now = Clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_SA);
-        if (duration.count() > TIME_LIMIT_MS)
+        double time_ratio = (double)duration.count() / TIME_LIMIT_MS;
+        if (time_ratio > 1.0)
         {
-            cerr << "[SA] Time limit reached, break.\n";
+            cerr << "[SA] Time limit reached.\n";
             break;
         }
 
-        if (stall_temps >= STALL_LIMIT)
-        {
-            cerr << "[SA] Early stop: no improvement for " << STALL_LIMIT << " temperature steps.\n";
-            break;
-        }
+        double scale_factor = T / initial_T;
+        double window_scale = std::max(0.01, std::min(1.0, sqrt(max(scale_factor, 1e-8))));
 
-        int iter_per_T = base_iter;
+        int accepted_moves = 0;
 
         for (int it = 0; it < iter_per_T; ++it)
         {
-            // 更新 tag
-            cur_tag++;
-            if (cur_tag == INT_MAX)
-            {
-                std::fill(visit_tag.begin(), visit_tag.end(), 0);
-                cur_tag = 1;
-            }
-
             net_tag++;
             if (net_tag == INT_MAX)
             {
@@ -512,24 +490,81 @@ void SA(vector<logic_info> &logic_blocks_table,
                 net_tag = 1;
             }
 
-            // 1. 做一個 optimal region random move
-            change_info chg = random_move_optimal(
-                logic_blocks_table, name2idx,
-                array2D, R, C,
-                net_table, net2hpwl_cong
-            );
+            int idxA = dist_block(rng);
+            logic_info &A = logic_blocks_table[idxA];
+            int Ax = A.x;
+            int Ay = A.y;
 
-            // 2. 找出受影響的 nets（A、B 兩顆 cell 相關聯的 nets）
+            int Bx, By;
+            bool use_region = (dist01(rng) < current_region_prob);
+            OptimalRegion region;
+
+            if (use_region)
+            {
+                region = compute_optimal_region_for_block(A, logic_blocks_table, net_table, pin_table, net_cost, window_scale);
+                if (region.lx == region.ux && region.ly == region.uy &&
+                    region.lx == Ax && region.ly == Ay)
+                {
+                    use_region = false;
+                }
+            }
+
+            int search_rx = std::max(1, (int)std::round(window_scale * R ));
+            int search_ry = std::max(1, (int)std::round(window_scale * C ));
+
+            do {
+                if (use_region) {
+                    std::uniform_int_distribution<int> dist_rx(region.lx, region.ux);
+                    std::uniform_int_distribution<int> dist_ry(region.ly, region.uy);
+                    Bx = dist_rx(rng);
+                    By = dist_ry(rng);
+                } else {
+                    int left   = std::max(0, Ax - search_rx);
+                    int right  = std::min(R - 1, Ax + search_rx);
+                    int bottom = std::max(0, Ay - search_ry);
+                    int top    = std::min(C - 1, Ay + search_ry);
+                    std::uniform_int_distribution<int> dist_rx(left, right);
+                    std::uniform_int_distribution<int> dist_ry(bottom, top);
+                    Bx = dist_rx(rng);
+                    By = dist_ry(rng);
+                }
+            } while (Bx == Ax && By == Ay);
+
+            string swap_target = array2D[Bx][By];
+            string nameA = A.name;
+            string temp_name;
+
+            // 做 swap（可能跟 none 換）
+            if (swap_target != "none")
+            {
+                int idxB = name2idx[swap_target];
+                auto &B = logic_blocks_table[idxB];
+                temp_name = B.name;
+                A.x = Bx; A.y = By;
+                B.x = Ax; B.y = Ay;
+                array2D[Ax][Ay] = swap_target;
+                array2D[Bx][By] = nameA;
+            }
+            else
+            {
+                temp_name = "none";
+                A.x = Bx; A.y = By;
+                array2D[Bx][By] = nameA;
+                array2D[Ax][Ay] = "none";
+            }
+
+            change_info chg;
+            chg.nameA = nameA; chg.Ax = Ax; chg.Ay = Ay;
+            chg.nameB = temp_name; chg.Bx = Bx; chg.By = By;
+
+            // 收集 affected nets
             std::vector<int> affected_nets;
             affected_nets.reserve(32);
 
-            auto collect_nets = [&](const std::string &blk_name)
-            {
-                if (blk_name == "none")
-                    return;
+            auto collect_nets = [&](const std::string &blk_name) {
+                if (blk_name == "none") return;
                 auto it_blk = name2idx.find(blk_name);
-                if (it_blk == name2idx.end())
-                    return;
+                if (it_blk == name2idx.end()) return;
                 const auto &blk = logic_blocks_table[it_blk->second];
                 for (int nid : blk.connect_nets)
                 {
@@ -540,203 +575,164 @@ void SA(vector<logic_info> &logic_blocks_table,
                     }
                 }
             };
-
             collect_nets(chg.nameA);
             collect_nets(chg.nameB);
 
-            // 3. 只對 affected nets 用 net2hpwl_cong 查舊 hpwl / box，
-            //    然後重新算新的 bbox / hpwl
+            if (affected_nets.empty())
+            {
+                // 這個 move 沒有任何 net 受影響 → 沒差，直接略過
+                undo_move(logic_blocks_table, name2idx, array2D, chg);
+                continue;
+            }
+
+            struct NetUpdate
+            {
+                int net_idx;
+                double old_hpwl;
+                rec old_box;
+                double new_hpwl;
+                rec new_box;
+            };
             std::vector<NetUpdate> updates;
             updates.reserve(affected_nets.size());
 
-            double trial_hpwl = total_hpwl; // 從現在的 total_hpwl 開始加差值
-
+            double trial_hpwl = total_hpwl;
             for (int nid : affected_nets)
             {
                 const net_info &net = net_table[nid];
-                const std::string &net_name = net.name;
-
-                // 從 net2hpwl_cong 查舊 hpwl / box
-                auto it_info = net2hpwl_cong.find(net_name);
-                double old_hp = 0.0;
-                rec old_rect{};
-                if (it_info != net2hpwl_cong.end())
-                {
-                    old_hp = it_info->second.hpwl;
-                    old_rect = it_info->second.box;
-                }
-
-                // 用目前 (已 move) 的 logic_blocks_table/pin_table
-                // 重新算 bbox
-                rec new_rect = calculate_bounding_box(net,
-                                                      logic_blocks_table,
-                                                      pin_table);
-                double new_hp = (new_rect.xmax - new_rect.xmin) +
-                                (new_rect.ymax - new_rect.ymin);
-
+                double old_hp   = net_cost[nid].hpwl;
+                rec    old_rect = net_cost[nid].box;
+                rec    new_rect = calculate_bounding_box(net, logic_blocks_table, pin_table);
+                double new_hp   = (new_rect.xmax - new_rect.xmin) + (new_rect.ymax - new_rect.ymin);
                 trial_hpwl += (new_hp - old_hp);
-
-                NetUpdate nu;
-                nu.net_idx = nid;
-                nu.net_name = net_name;
-                nu.old_hpwl = old_hp;
-                nu.old_box = old_rect;
-                nu.new_hpwl = new_hp;
-                nu.new_box = new_rect;
-                updates.push_back(nu);
+                updates.push_back({nid, old_hp, old_rect, new_hp, new_rect});
             }
 
-            // 4. 對 U 做「暫時性的」更新，順便算 new_sumU / new_sumU2
-            long long new_sumU = sumU;
-            long long new_sumU2 = sumU2;
-
-            std::vector<CellBackup> cell_backups;
-            cell_backups.reserve(256);
-
-            auto apply_rect_delta = [&](const rec &box, int delta)
-            {
-                int x_start = std::max(0, (int)floor(box.xmin));
-                int x_end   = std::min(C, (int)ceil(box.xmax)); // [x_start, x_end)
-                int y_start = std::max(0, (int)floor(box.ymin));
-                int y_end   = std::min(R, (int)ceil(box.ymax)); // [y_start, y_end)
-
-                for (int y = y_start; y < y_end; ++y)
-                {
-                    for (int x = x_start; x < x_end; ++x)
-                    {
-                        int id = y * C + x;
-
-                        if (visit_tag[id] != cur_tag)
-                        {
-                            visit_tag[id] = cur_tag;
-                            CellBackup bk{x, y, U[y][x]};
-                            cell_backups.push_back(bk);
-                        }
-
-                        int old_v = U[y][x];
-                        int new_v = old_v + delta;
-                        U[y][x] = new_v;
-
-                        new_sumU  += delta;
-                        new_sumU2 += 1LL * new_v * new_v - 1LL * old_v * old_v;
-                    }
-                }
-            };
-
-            // 用 net2hpwl_cong 的舊 box 先 -1，再用新 box +1
+            // 對 U / sumU / sumU2 套用 old -> -1, new -> +1
             for (const auto &u : updates)
             {
-                if (u.old_hpwl > 0.0)
-                {
-                    apply_rect_delta(u.old_box, -1);
-                }
-                apply_rect_delta(u.new_box, +1);
+                if (u.old_hpwl > 0.0) apply_rect_delta_on_U(u.old_box, -1, U, sumU, sumU2);
+                if (u.new_hpwl > 0.0) apply_rect_delta_on_U(u.new_box, +1, U, sumU, sumU2);
             }
 
-            // 用更新後的 U 統計值得到 new_CC
             double new_CC;
-            if (new_sumU == 0)
-            {
-                new_CC = 1.0;
-            }
-            else
-            {
-                new_CC = (double)N * (double)new_sumU2 /
-                         ((double)new_sumU * (double)new_sumU);
-            }
+            if (sumU == 0 || Nsite == 0) new_CC = 1.0;
+            else new_CC = (double)Nsite * (double)sumU2 / ((double)sumU * (double)sumU);
 
             double new_cost = compute_cost(trial_hpwl, new_CC, lambda);
             double delta_cost = new_cost - cur_cost;
-            bool accept = false;
 
-            // 5. SA 接受規則
-            if (delta_cost <= 0)
-            {
-                accept = true;
-            }
-            else
-            {
-                double u = dist01(rng);
-                if (u < exp(-delta_cost / T))
-                    accept = true;
-            }
+            bool accept = false;
+            if (delta_cost <= 0.0) accept = true;
+            else if (dist01(rng) < exp(-delta_cost / T)) accept = true;
 
             if (accept)
             {
-                // 6. 接受：commit incremental 更新
-                cur_cost = new_cost;
+                cur_cost   = new_cost;
                 total_hpwl = trial_hpwl;
-                CC = new_CC;
-                sumU = new_sumU;
-                sumU2 = new_sumU2;
+                CC         = new_CC;
 
-                // 用 net2hpwl_cong 更新 affected nets 的 hpwl / box
                 for (const auto &u : updates)
                 {
-                    auto &info = net2hpwl_cong[u.net_name];
-                    info.hpwl = u.new_hpwl;
-                    info.box = u.new_box;
+                    net_cost[u.net_idx].hpwl = u.new_hpwl;
+                    net_cost[u.net_idx].box  = u.new_box;
                 }
 
-                // 更新 best solution
                 if (cur_cost < best_cost)
                 {
                     best_cost = cur_cost;
                     best_hpwl = total_hpwl;
-                    best_CC = CC;
+                    best_CC   = CC;
                     best_logic_blocks = logic_blocks_table;
-                    best_array2D = array2D;
+                    best_array2D      = array2D;
                 }
+                accepted_moves++;
             }
             else
             {
-                // 7. 不接受：把 U 還原，位置用 undo_move 拉回
-                for (const auto &bk : cell_backups)
+                // U / sumU / sumU2 revert：new -1, old +1
+                for (const auto &u : updates)
                 {
-                    U[bk.y][bk.x] = bk.old_val;
+                    if (u.new_hpwl > 0.0) apply_rect_delta_on_U(u.new_box, -1, U, sumU, sumU2);
+                    if (u.old_hpwl > 0.0) apply_rect_delta_on_U(u.old_box, +1, U, sumU, sumU2);
                 }
                 undo_move(logic_blocks_table, name2idx, array2D, chg);
-                // total_hpwl / CC / sumU / sumU2 / net2hpwl_cong 都維持舊的
             }
         }
 
-        cerr << "[TEMP] T=" << T
-             << " best_cost=" << best_cost
-             << " best_HPWL=" << best_hpwl
-             << " best_CC=" << best_CC << endl;
+        // 動態調整 region prob
+        double acceptance_rate = (double)accepted_moves / (double)iter_per_T;
 
-        // 溫度層結束後檢查是否有進步
-        if (best_cost < last_best_cost - IMPROVE_EPS)
-        {
-            last_best_cost = best_cost;
-            stall_temps = 0;
+        if (acceptance_rate > 0.85) {
+            current_region_prob -= prob_step_down;
+        } else if (acceptance_rate > 0.6) {
+            current_region_prob += prob_step_up;
+        } else if (acceptance_rate > 0.15) {
+            current_region_prob += prob_step_up;
+        } else {
+            current_region_prob -= prob_step_down;
         }
-        else
+        if (current_region_prob < min_region_prob) current_region_prob = min_region_prob;
+        if (current_region_prob > max_region_prob) current_region_prob = max_region_prob;
+
+        // 溫度更新
+        double alpha;
+        if (time_ratio > 0.9)       alpha = 0.5;
+        else if (time_ratio > 0.6)  alpha = 0.82;
+        else {
+            if      (acceptance_rate > 0.9)  alpha = 0.7;
+            else if (acceptance_rate > 0.7)  alpha = 0.85;
+            else if (acceptance_rate < 0.15) alpha = 0.95;
+            else                             alpha = 0.9;
+        }
+        T *= alpha;
+
+        // moves / T 動態
+        if (acceptance_rate > 0.9)
         {
-            stall_temps++;
+            int nm = (int)(iter_per_T * 0.9);
+            iter_per_T = max(nm, 4000);
+        }
+        else if (acceptance_rate < 0.2)
+        {
+            int nm = (int)(iter_per_T * 1.1);
+            iter_per_T = min(nm, 60000);
         }
 
-        T *= alpha; // 降溫
+        round_cnt++;
+        if (acceptance_rate < 0.02) low_acc_rounds++;
+        else low_acc_rounds = 0;
+        if (low_acc_rounds >= 6)
+        {
+            cerr << "[SA] Early stop due to very low acceptance.\n";
+            break;
+        }
+
+        cerr << "Round=" << round_cnt
+             << " T=" << T
+             << " Acc=" << acceptance_rate
+             << " HPWL=" << best_hpwl
+             << " CC=" << best_CC
+             << " Lam=" << lambda
+             << " Time=" << time_ratio << endl;
     }
 
-    // 退火結束 → 回到最佳解
     logic_blocks_table = best_logic_blocks;
     array2D = best_array2D;
     total_hpwl = best_hpwl;
     CC = best_CC;
 
-    // 最後再 full recompute 一次，讓 net2hpwl_cong / U 對應到 best solution
-    compute_hpwl_cong(logic_blocks_table, pin_table, net_table,
-                      U, net2hpwl_cong, total_hpwl, CC);
-    best_cost = compute_cost(total_hpwl, CC, lambda);
-
-    cerr << "[FINAL] HPWL=" << total_hpwl
-         << " CC=" << CC
-         << " cost=" << best_cost << endl;
+    // 重新算一次，確保狀態一致
+    compute_hpwl_cong(logic_blocks_table, pin_table, net_table, U, net_cost, total_hpwl, CC);
 }
 
-
-void parse_input(ifstream &parse, vector<logic_info> &logic_blocks_table, vector<pin_info> &pin_table, vector<net_info> &net_table, unordered_map<string, int> &name2idx, unordered_map<string, int> &pin2idx, unordered_map<string, int> &net2idx)
+void parse_input(ifstream &parse,
+                 vector<logic_info> &logic_blocks_table,
+                 vector<pin_info> &pin_table,
+                 vector<net_info> &net_table,
+                 unordered_map<string, int> &name2idx,
+                 unordered_map<string, int> &pin2idx,
+                 unordered_map<string, int> &net2idx)
 {
     string line;
     getline(parse, line);
@@ -752,9 +748,7 @@ void parse_input(ifstream &parse, vector<logic_info> &logic_blocks_table, vector
         istringstream logic_inf(line);
         logic_inf >> name;
         logic_info inst;
-        inst.name = name;
-        inst.x = 0;
-        inst.y = 0;
+        inst.name = name; inst.x = 0; inst.y = 0;
         logic_blocks_table.push_back(inst);
         name2idx.insert({name, i});
     }
@@ -766,9 +760,7 @@ void parse_input(ifstream &parse, vector<logic_info> &logic_blocks_table, vector
         istringstream pin_inf(line);
         pin_inf >> name >> x >> y;
         pin_info inst;
-        inst.name = name;
-        inst.x = x;
-        inst.y = y;
+        inst.name = name; inst.x = x; inst.y = y;
         pin_table.push_back(inst);
         pin2idx.insert({name, i});
     }
@@ -780,20 +772,17 @@ void parse_input(ifstream &parse, vector<logic_info> &logic_blocks_table, vector
         istringstream net_inf(line);
         net_inf >> name >> degree;
         net_info inst;
-        inst.name = name;
-        inst.degree = degree;
+        inst.name = name; inst.degree = degree;
 
         for (int j = 0; j < degree; j++)
         {
             string item;
             net_inf >> item;
             inst.connections.push_back(item);
-
             NetTerm term;
             auto it_blk = name2idx.find(item);
             if (it_blk != name2idx.end())
             {
-                // 是 movable block
                 term.is_pin = false;
                 term.idx = it_blk->second;
                 logic_blocks_table[it_blk->second].connect_nets.push_back(i);
@@ -803,13 +792,11 @@ void parse_input(ifstream &parse, vector<logic_info> &logic_blocks_table, vector
                 auto it_pin = pin2idx.find(item);
                 if (it_pin != pin2idx.end())
                 {
-                    // 是 IO pin
                     term.is_pin = true;
                     term.idx = it_pin->second;
                 }
                 else
                 {
-                    // 理論上不會
                     term.is_pin = true;
                     term.idx = -1;
                 }
@@ -821,105 +808,6 @@ void parse_input(ifstream &parse, vector<logic_info> &logic_blocks_table, vector
     }
 }
 
-void print_logic_blocks(const vector<logic_info> &logic_blocks_table)
-{
-    cout << "=== Logic Blocks ===\n";
-    for (size_t i = 0; i < logic_blocks_table.size(); ++i)
-    {
-        const auto &lb = logic_blocks_table[i];
-        cout << "[" << i << "] "
-             << "name = " << lb.name
-             << ", pos = (" << lb.x << ", " << lb.y << ")"
-             << ", nets = { ";
-
-        for (size_t k = 0; k < lb.connect_nets.size(); ++k)
-        {
-            cout << lb.connect_nets[k];
-            if (k + 1 != lb.connect_nets.size())
-                cout << ", ";
-        }
-
-        cout << " }\n";
-    }
-    cout << endl;
-}
-void print_pins(const vector<pin_info> &pin_table)
-{
-    cout << "=== IO Pins ===\n";
-    for (size_t i = 0; i < pin_table.size(); ++i)
-    {
-        const auto &p = pin_table[i];
-        cout << i << ": name=" << p.name
-             << " x=" << p.x
-             << " y=" << p.y << "\n";
-    }
-    cout << endl;
-}
-void print_nets(const vector<net_info> &net_table)
-{
-    cout << "=== Nets ===\n";
-    for (size_t i = 0; i < net_table.size(); ++i)
-    {
-        const auto &n = net_table[i];
-        cout << i << ": name=" << n.name
-             << " degree=" << n.degree
-             << " connections = ";
-        for (auto &c : n.connections)
-        {
-            cout << c << " ";
-        }
-        cout << "\n";
-    }
-    cout << endl;
-}
-void print_net2hpwl_cong(const unordered_map<string, net_hpwl_cong> &net2hpwl_cong)
-{
-    cout << "=== net2hpwl_cong ===\n";
-    int count = 0;
-    for (const auto &kv : net2hpwl_cong)
-    {
-        const string &net_name = kv.first;
-        const net_hpwl_cong &info = kv.second;
-
-        cout << "Net: " << net_name << "\n";
-        cout << "  HPWL = " << info.hpwl << "\n";
-        cout << "  Box: "
-             << "(xmin=" << info.box.xmin
-             << ", xmax=" << info.box.xmax
-             << ", ymin=" << info.box.ymin
-             << ", ymax=" << info.box.ymax
-             << ")\n";
-        count++;
-    }
-    cout << count << endl;
-    cout << endl;
-}
-void print_U(const vector<vector<int>> &U)
-{
-    cout << "=== U congestion map ===\n";
-    for (int r = 0; r < (int)U.size(); r++)
-    {
-        for (int c = 0; c < (int)U[r].size(); c++)
-        {
-            cout << U[r][c] << " ";
-        }
-        cout << "\n";
-    }
-    cout << endl;
-}
-void print_array2D(const vector<vector<string>> &array2D)
-{
-    cout << "=== array2D placement ===\n";
-    for (int r = 0; r < (int)array2D.size(); r++)
-    {
-        for (int c = 0; c < (int)array2D[r].size(); c++)
-        {
-            cout << array2D[r][c] << " ";
-        }
-        cout << "\n";
-    }
-    cout << endl;
-}
 void write_output(const string &out_file, const vector<logic_info> &logic_blocks_table)
 {
     ofstream fout(out_file);
@@ -951,29 +839,37 @@ int main(int argc, char *argv[])
         cerr << "Failed to open input file: " << argv[1] << endl;
         return 1;
     }
+
     vector<logic_info> logic_blocks_table;
     vector<pin_info> pin_table;
     vector<net_info> net_table;
     unordered_map<string, int> name2idx;
     unordered_map<string, int> pin2idx;
     unordered_map<string, int> net2idx;
-    unordered_map<string, net_hpwl_cong> net2hpwl_cong;
+
     double total_hpwl, CC;
-    parse_input(parse_in, logic_blocks_table, pin_table, net_table, name2idx, pin2idx, net2idx);
+
+    parse_input(parse_in, logic_blocks_table, pin_table, net_table,
+                name2idx, pin2idx, net2idx);
+
     vector<vector<string>> array2D(R, vector<string>(C, "none"));
     vector<vector<int>> U(R, vector<int>(C, 0));
+    vector<net_hpwl_cong> net_cost(net_table.size());
 
     initial_place(array2D, R, C, logic_blocks_table);
 
-    compute_hpwl_cong(logic_blocks_table, pin_table, net_table, U, net2hpwl_cong, total_hpwl, CC);
+    compute_hpwl_cong(logic_blocks_table, pin_table, net_table,
+                      U, net_cost, total_hpwl, CC);
+
     SA(logic_blocks_table, array2D,
        pin_table, net_table,
        name2idx, pin2idx,
-       net2hpwl_cong, U,
+       net_cost, U,
        total_hpwl, CC);
 
     cout << "[FINAL] HPWL=" << total_hpwl
          << " CC=" << CC << endl;
+
     write_output(string(argv[2]), logic_blocks_table);
 
     auto end = Clock::now();
