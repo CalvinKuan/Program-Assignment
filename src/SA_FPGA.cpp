@@ -207,11 +207,7 @@ void compute_hpwl_cong(const vector<logic_info> &logic_blocks_table,
 
 double compute_cost(double total_hpwl, double CC, double lambda)
 {
-    if(CC <1.04){
-        return total_hpwl*1.04;
-    }
-    (void)lambda;               // 目前先不用 lambda，保留參數以後好調
-    return total_hpwl * CC;     // 作業指定：HPWL * CC
+    return total_hpwl * CC;
 }
 
 void undo_move(vector<logic_info> &logic_blocks_table,
@@ -430,10 +426,11 @@ void SA(vector<logic_info> &logic_blocks_table,
     double initial_T = T;
     double T_end  = 1e-5;
 
+
     int base_iter;
     if (num_cells < 3000)
     {
-        base_iter = std::max(8000, std::min(num_cells * 40, 80000));
+        base_iter = 200000;
     }
     else if (num_cells < 8000)
     {
