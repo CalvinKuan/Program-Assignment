@@ -63,7 +63,7 @@ struct net_hpwl_cong
 
 struct change_info
 {
-    string nameA, nameB;
+    int idxA, idxB;
     int Ax, Ay;
     int Bx, By;
 };
@@ -74,19 +74,26 @@ struct OptimalRegion
     int ux, uy;
 };
 
-void initial_place(vector<vector<string>> &array2D, int R, int C,
+void initial_place(vector<vector<int>> &grid, int R, int C,
                    vector<logic_info> &logic_blocks_table)
 {
     int N = (int)logic_blocks_table.size();
     int idx = 0;
-    for (int i = 0; i < R && idx < N; ++i)
+    for (int i = 0; i < R; ++i)
     {
-        for (int j = 0; j < C && idx < N; ++j)
+        for (int j = 0; j < C; ++j)
         {
-            array2D[i][j] = logic_blocks_table[idx].name;
-            logic_blocks_table[idx].x = i;
-            logic_blocks_table[idx].y = j;
-            ++idx;
+            if (idx < N)
+            {
+                grid[i][j] = idx;
+                logic_blocks_table[idx].x = i;
+                logic_blocks_table[idx].y = j;
+                ++idx;
+            }
+            else
+            {
+                grid[i][j] = -1;
+            }
         }
     }
 }
@@ -100,8 +107,7 @@ rec calculate_bounding_box(const net_info &net,
 
     for (const auto &term : net.terms)
     {
-        if (term.idx < 0)
-            continue;
+        if (term.idx < 0) continue;
 
         double this_xmin, this_xmax, this_ymin, this_ymax;
 
@@ -128,10 +134,8 @@ rec calculate_bounding_box(const net_info &net,
 
         if (first)
         {
-            xmin = this_xmin;
-            xmax = this_xmax;
-            ymin = this_ymin;
-            ymax = this_ymax;
+            xmin = this_xmin; xmax = this_xmax;
+            ymin = this_ymin; ymax = this_ymax;
             first = false;
         }
         else
@@ -149,10 +153,8 @@ rec calculate_bounding_box(const net_info &net,
         Rect.xmin = Rect.xmax = Rect.ymin = Rect.ymax = 0.0;
         return Rect;
     }
-    Rect.xmin = xmin;
-    Rect.xmax = xmax;
-    Rect.ymin = ymin;
-    Rect.ymax = ymax;
+    Rect.xmin = xmin; Rect.xmax = xmax;
+    Rect.ymin = ymin; Rect.ymax = ymax;
     return Rect;
 }
 
@@ -177,12 +179,12 @@ void compute_hpwl_cong(const vector<logic_info> &logic_blocks_table,
         total_hpwl += hpwl;
 
         net_cost[i].hpwl = hpwl;
-        net_cost[i].box = box;
+        net_cost[i].box  = box;
 
         int x_start = max(0, (int)floor(box.xmin));
-        int x_end = min(C, (int)ceil(box.xmax));
+        int x_end   = min(C, (int)ceil(box.xmax));
         int y_start = max(0, (int)floor(box.ymin));
-        int y_end = min(R, (int)ceil(box.ymax));
+        int y_end   = min(R, (int)ceil(box.ymax));
 
         for (int y = y_start; y < y_end; ++y)
         {
@@ -206,42 +208,33 @@ void compute_hpwl_cong(const vector<logic_info> &logic_blocks_table,
         }
     }
 
-    if (sumU == 0)
-        CC = 1.0;
-    else
-        CC = (double)N * (double)sumU2 / ((double)sumU * (double)sumU);
+    if (sumU == 0) CC = 1.0;
+    else CC = (double)N * (double)sumU2 / ((double)sumU * (double)sumU);
 }
 
 double compute_cost(double total_hpwl, double CC, double lambda)
 {
+    (void)lambda; // 用不到 lambda，目前 cost = HPWL * CC
     return total_hpwl * CC;
 }
 
 void undo_move(vector<logic_info> &logic_blocks_table,
-               unordered_map<string, int> &name2idx,
-               vector<vector<string>> &array2D,
+               vector<vector<int>> &grid,
                const change_info &chg)
 {
-    int idxA = name2idx[chg.nameA];
-    auto &A = logic_blocks_table[idxA];
+    auto &A = logic_blocks_table[chg.idxA];
+    A.x = chg.Ax; A.y = chg.Ay;
+    grid[chg.Ax][chg.Ay] = chg.idxA;
 
-    if (chg.nameB != "none")
+    if (chg.idxB >= 0)
     {
-        int idxB = name2idx[chg.nameB];
-        auto &B = logic_blocks_table[idxB];
-        A.x = chg.Ax;
-        A.y = chg.Ay;
-        B.x = chg.Bx;
-        B.y = chg.By;
-        array2D[chg.Ax][chg.Ay] = chg.nameA;
-        array2D[chg.Bx][chg.By] = chg.nameB;
+        auto &B = logic_blocks_table[chg.idxB];
+        B.x = chg.Bx; B.y = chg.By;
+        grid[chg.Bx][chg.By] = chg.idxB;
     }
     else
     {
-        A.x = chg.Ax;
-        A.y = chg.Ay;
-        array2D[chg.Ax][chg.Ay] = chg.nameA;
-        array2D[chg.Bx][chg.By] = "none";
+        grid[chg.Bx][chg.By] = -1;
     }
 }
 
@@ -255,6 +248,7 @@ OptimalRegion compute_optimal_region_for_block(
 {
     (void)logic_blocks_table;
     (void)pin_table;
+    (void)net_table;
 
     double sum_cx = 0.0;
     double sum_cy = 0.0;
@@ -263,8 +257,7 @@ OptimalRegion compute_optimal_region_for_block(
     for (int nid : blk.connect_nets)
     {
         const rec &box = net_cost[nid].box;
-        if (box.xmax <= box.xmin && box.ymax <= box.ymin)
-            continue;
+        if (box.xmax <= box.xmin && box.ymax <= box.ymin) continue;
 
         double cx = 0.5 * (box.xmin + box.xmax);
         double cy = 0.5 * (box.ymin + box.ymax);
@@ -276,10 +269,8 @@ OptimalRegion compute_optimal_region_for_block(
     OptimalRegion region;
     if (cnt == 0)
     {
-        region.lx = 0;
-        region.ly = 0;
-        region.ux = max(0, R - 1);
-        region.uy = max(0, C - 1);
+        region.lx = 0; region.ly = 0;
+        region.ux = max(0, R - 1); region.uy = max(0, C - 1);
         return region;
     }
 
@@ -291,8 +282,8 @@ OptimalRegion compute_optimal_region_for_block(
     center_x = std::max(0, std::min(R - 1, center_x));
     center_y = std::max(0, std::min(C - 1, center_y));
 
-    int base_w = std::max(1, R / 8);
-    int base_h = std::max(1, C / 8);
+    int base_w = std::max(1, R / 10);
+    int base_h = std::max(1, C / 10);
 
     int half_w = std::max(2, (int)(base_w * scale));
     int half_h = std::max(2, (int)(base_h * scale));
@@ -305,7 +296,7 @@ OptimalRegion compute_optimal_region_for_block(
     return region;
 }
 
-// 取樣幾個 swap 估 T0（比較接近工業版作法）
+// 取樣幾個 swap 估 T0
 double EstimateInitialTemperature(const vector<logic_info> &logic_blocks_table,
                                   const vector<pin_info> &pin_table,
                                   const vector<net_info> &net_table,
@@ -315,10 +306,8 @@ double EstimateInitialTemperature(const vector<logic_info> &logic_blocks_table,
 {
     double base_cost = compute_cost(total_hpwl, CC, lambda);
     int num_cells = (int)logic_blocks_table.size();
-    if (num_cells <= 1)
-        return 1.0;
+    if (num_cells <= 1) return 1.0;
 
-    // 複製一份 blocks 用來做暫時測試
     vector<logic_info> tmp_blocks = logic_blocks_table;
     vector<vector<int>> tmpU(R, vector<int>(C, 0));
     vector<net_hpwl_cong> tmp_net_cost(net_table.size());
@@ -327,14 +316,13 @@ double EstimateInitialTemperature(const vector<logic_info> &logic_blocks_table,
     int num_samples = min(60, num_cells * 2);
 
     double sum_pos_delta = 0.0;
-    int cnt_pos = 0;
+    int    cnt_pos       = 0;
 
     for (int s = 0; s < num_samples; ++s)
     {
         int a = dist_block(rng);
         int b = dist_block(rng);
-        if (a == b)
-            continue;
+        if (a == b) continue;
 
         swap(tmp_blocks[a].x, tmp_blocks[b].x);
         swap(tmp_blocks[a].y, tmp_blocks[b].y);
@@ -349,19 +337,16 @@ double EstimateInitialTemperature(const vector<logic_info> &logic_blocks_table,
             cnt_pos++;
         }
 
-        // swap back
         swap(tmp_blocks[a].x, tmp_blocks[b].x);
         swap(tmp_blocks[a].y, tmp_blocks[b].y);
     }
 
-    if (cnt_pos == 0)
-        return max(1.0, base_cost * 0.01);
+    if (cnt_pos == 0) return max(1.0, base_cost * 0.01);
 
     double avg_pos_delta = sum_pos_delta / (double)cnt_pos;
     double p0 = 0.8;
     double T0 = -avg_pos_delta / std::log(p0);
-    if (T0 <= 0.0)
-        T0 = max(1.0, base_cost * 0.01);
+    if (T0 <= 0.0) T0 = max(1.0, base_cost * 0.01);
     return T0;
 }
 
@@ -373,12 +358,11 @@ static inline void apply_rect_delta_on_U(const rec &box,
                                          long long &sumU2)
 {
     int x_start = max(0, (int)floor(box.xmin));
-    int x_end = min(C, (int)ceil(box.xmax));
+    int x_end   = min(C, (int)ceil(box.xmax));
     int y_start = max(0, (int)floor(box.ymin));
-    int y_end = min(R, (int)ceil(box.ymax));
+    int y_end   = min(R, (int)ceil(box.ymax));
 
-    if (x_start >= x_end || y_start >= y_end)
-        return;
+    if (x_start >= x_end || y_start >= y_end) return;
 
     for (int y = y_start; y < y_end; ++y)
     {
@@ -387,35 +371,29 @@ static inline void apply_rect_delta_on_U(const rec &box,
             int old_v = U[y][x];
             int new_v = old_v + delta;
             U[y][x] = new_v;
-            sumU += (new_v - old_v);
+            sumU  += (new_v - old_v);
             sumU2 += 1LL * new_v * new_v - 1LL * old_v * old_v;
         }
     }
 }
 
 void SA(vector<logic_info> &logic_blocks_table,
-        vector<vector<string>> &array2D,
+        vector<vector<int>> &grid,
         vector<pin_info> &pin_table,
         vector<net_info> &net_table,
-        unordered_map<string, int> &name2idx,
-        unordered_map<string, int> &pin2idx,
         vector<net_hpwl_cong> &net_cost,
         vector<vector<int>> &U,
         double &total_hpwl,
         double &CC)
 {
-    (void)pin2idx;
-
     auto start_SA = Clock::now();
     const int TIME_LIMIT_MS = 225000;
 
     int num_cells = (int)logic_blocks_table.size();
-    if (num_cells == 0)
-        return;
+    if (num_cells == 0) return;
 
     double lambda = 3.0;
 
-    // 先把 sumU / sumU2 算出來
     long long sumU = 0;
     long long sumU2 = 0;
     for (int y = 0; y < R; ++y)
@@ -432,7 +410,7 @@ void SA(vector<logic_info> &logic_blocks_table,
     double cur_cost = compute_cost(total_hpwl, CC, lambda);
     double best_cost = cur_cost;
     auto best_logic_blocks = logic_blocks_table;
-    auto best_array2D = array2D;
+    auto best_grid = grid;
     double best_hpwl = total_hpwl;
     double best_CC = CC;
 
@@ -443,7 +421,7 @@ void SA(vector<logic_info> &logic_blocks_table,
     double T = EstimateInitialTemperature(logic_blocks_table, pin_table, net_table,
                                           total_hpwl, CC, lambda);
     double initial_T = T;
-    double T_end = 1e-5;
+    double T_end  = 1e-5;
 
     int base_iter;
     if (num_cells < 3000)
@@ -462,8 +440,6 @@ void SA(vector<logic_info> &logic_blocks_table,
 
     std::uniform_real_distribution<double> dist01(0.0, 1.0);
     std::uniform_int_distribution<int> dist_block(0, num_cells - 1);
-    std::uniform_int_distribution<int> distR(0, R - 1);
-    std::uniform_int_distribution<int> distC(0, C - 1);
 
     int netN = (int)net_table.size();
     std::vector<int> net_mark(netN, 0);
@@ -472,7 +448,7 @@ void SA(vector<logic_info> &logic_blocks_table,
     double current_region_prob = 0.3;
     const double max_region_prob = 0.95;
     const double min_region_prob = 0.05;
-    const double prob_step_up = 0.02;
+    const double prob_step_up   = 0.02;
     const double prob_step_down = 0.02;
 
     int round_cnt = 0;
@@ -524,24 +500,20 @@ void SA(vector<logic_info> &logic_blocks_table,
                 }
             }
 
-            int search_rx = std::max(1, (int)std::round(window_scale * R));
-            int search_ry = std::max(1, (int)std::round(window_scale * C));
+            int search_rx = std::max(1, (int)std::round(window_scale * R ));
+            int search_ry = std::max(1, (int)std::round(window_scale * C ));
 
-            do
-            {
-                if (use_region)
-                {
+            do {
+                if (use_region) {
                     std::uniform_int_distribution<int> dist_rx(region.lx, region.ux);
                     std::uniform_int_distribution<int> dist_ry(region.ly, region.uy);
                     Bx = dist_rx(rng);
                     By = dist_ry(rng);
-                }
-                else
-                {
-                    int left = std::max(0, Ax - search_rx);
-                    int right = std::min(R - 1, Ax + search_rx);
+                } else {
+                    int left   = std::max(0, Ax - search_rx);
+                    int right  = std::min(R - 1, Ax + search_rx);
                     int bottom = std::max(0, Ay - search_ry);
-                    int top = std::min(C - 1, Ay + search_ry);
+                    int top    = std::min(C - 1, Ay + search_ry);
                     std::uniform_int_distribution<int> dist_rx(left, right);
                     std::uniform_int_distribution<int> dist_ry(bottom, top);
                     Bx = dist_rx(rng);
@@ -549,52 +521,33 @@ void SA(vector<logic_info> &logic_blocks_table,
                 }
             } while (Bx == Ax && By == Ay);
 
-            string swap_target = array2D[Bx][By];
-            string nameA = A.name;
-            string temp_name;
+            int idxB = grid[Bx][By];
 
-            // 做 swap（可能跟 none 換）
-            if (swap_target != "none")
+            change_info chg;
+            chg.idxA = idxA; chg.Ax = Ax; chg.Ay = Ay;
+            chg.idxB = idxB; chg.Bx = Bx; chg.By = By;
+
+            if (idxB >= 0)
             {
-                int idxB = name2idx[swap_target];
                 auto &B = logic_blocks_table[idxB];
-                temp_name = B.name;
-                A.x = Bx;
-                A.y = By;
-                B.x = Ax;
-                B.y = Ay;
-                array2D[Ax][Ay] = swap_target;
-                array2D[Bx][By] = nameA;
+                A.x = Bx; A.y = By;
+                B.x = Ax; B.y = Ay;
+                grid[Ax][Ay] = idxB;
+                grid[Bx][By] = idxA;
             }
             else
             {
-                temp_name = "none";
-                A.x = Bx;
-                A.y = By;
-                array2D[Bx][By] = nameA;
-                array2D[Ax][Ay] = "none";
+                A.x = Bx; A.y = By;
+                grid[Bx][By] = idxA;
+                grid[Ax][Ay] = -1;
             }
 
-            change_info chg;
-            chg.nameA = nameA;
-            chg.Ax = Ax;
-            chg.Ay = Ay;
-            chg.nameB = temp_name;
-            chg.Bx = Bx;
-            chg.By = By;
-
-            // 收集 affected nets
             std::vector<int> affected_nets;
             affected_nets.reserve(32);
 
-            auto collect_nets = [&](const std::string &blk_name)
-            {
-                if (blk_name == "none")
-                    return;
-                auto it_blk = name2idx.find(blk_name);
-                if (it_blk == name2idx.end())
-                    return;
-                const auto &blk = logic_blocks_table[it_blk->second];
+            auto collect_nets = [&](int blk_idx) {
+                if (blk_idx < 0) return;
+                const auto &blk = logic_blocks_table[blk_idx];
                 for (int nid : blk.connect_nets)
                 {
                     if (net_mark[nid] != net_tag)
@@ -604,13 +557,12 @@ void SA(vector<logic_info> &logic_blocks_table,
                     }
                 }
             };
-            collect_nets(chg.nameA);
-            collect_nets(chg.nameB);
+            collect_nets(chg.idxA);
+            collect_nets(chg.idxB);
 
             if (affected_nets.empty())
             {
-                // 這個 move 沒有任何 net 受影響 → 沒差，直接略過
-                undo_move(logic_blocks_table, name2idx, array2D, chg);
+                undo_move(logic_blocks_table, grid, chg);
                 continue;
             }
 
@@ -629,118 +581,67 @@ void SA(vector<logic_info> &logic_blocks_table,
             for (int nid : affected_nets)
             {
                 const net_info &net = net_table[nid];
-                double old_hp = net_cost[nid].hpwl;
-                rec old_rect = net_cost[nid].box;
-                rec new_rect = calculate_bounding_box(net, logic_blocks_table, pin_table);
-                double new_hp = (new_rect.xmax - new_rect.xmin) + (new_rect.ymax - new_rect.ymin);
+                double old_hp   = net_cost[nid].hpwl;
+                rec    old_rect = net_cost[nid].box;
+                rec    new_rect = calculate_bounding_box(net, logic_blocks_table, pin_table);
+                double new_hp   = (new_rect.xmax - new_rect.xmin) + (new_rect.ymax - new_rect.ymin);
                 trial_hpwl += (new_hp - old_hp);
                 updates.push_back({nid, old_hp, old_rect, new_hp, new_rect});
             }
 
-            // 對 U / sumU / sumU2 套用 old -> -1, new -> +1
             for (const auto &u : updates)
             {
-                if (u.old_hpwl > 0.0)
-                    apply_rect_delta_on_U(u.old_box, -1, U, sumU, sumU2);
-                if (u.new_hpwl > 0.0)
-                    apply_rect_delta_on_U(u.new_box, +1, U, sumU, sumU2);
+                if (u.old_hpwl > 0.0) apply_rect_delta_on_U(u.old_box, -1, U, sumU, sumU2);
+                if (u.new_hpwl > 0.0) apply_rect_delta_on_U(u.new_box, +1, U, sumU, sumU2);
             }
 
             double new_CC;
-            if (sumU == 0 || Nsite == 0)
-                new_CC = 1.0;
-            else
-                new_CC = (double)Nsite * (double)sumU2 / ((double)sumU * (double)sumU);
+            if (sumU == 0 || Nsite == 0) new_CC = 1.0;
+            else new_CC = (double)Nsite * (double)sumU2 / ((double)sumU * (double)sumU);
 
             double new_cost = compute_cost(trial_hpwl, new_CC, lambda);
             double delta_cost = new_cost - cur_cost;
 
             bool accept = false;
-            if (delta_cost <= 0.0)
-                accept = true;
-            else if (dist01(rng) < exp(-delta_cost / T))
-                accept = true;
+            if (delta_cost <= 0.0) accept = true;
+            else if (dist01(rng) < exp(-delta_cost / T)) accept = true;
 
             if (accept)
             {
-                cur_cost = new_cost;
+                cur_cost   = new_cost;
                 total_hpwl = trial_hpwl;
-                CC = new_CC;
+                CC         = new_CC;
 
                 for (const auto &u : updates)
                 {
                     net_cost[u.net_idx].hpwl = u.new_hpwl;
-                    net_cost[u.net_idx].box = u.new_box;
+                    net_cost[u.net_idx].box  = u.new_box;
                 }
 
                 if (cur_cost < best_cost)
                 {
                     best_cost = cur_cost;
                     best_hpwl = total_hpwl;
-                    best_CC = CC;
+                    best_CC   = CC;
                     best_logic_blocks = logic_blocks_table;
-                    best_array2D = array2D;
+                    best_grid         = grid;
                 }
                 accepted_moves++;
             }
             else
             {
-                // U / sumU / sumU2 revert：new -1, old +1
                 for (const auto &u : updates)
                 {
-                    if (u.new_hpwl > 0.0)
-                        apply_rect_delta_on_U(u.new_box, -1, U, sumU, sumU2);
-                    if (u.old_hpwl > 0.0)
-                        apply_rect_delta_on_U(u.old_box, +1, U, sumU, sumU2);
+                    if (u.new_hpwl > 0.0) apply_rect_delta_on_U(u.new_box, -1, U, sumU, sumU2);
+                    if (u.old_hpwl > 0.0) apply_rect_delta_on_U(u.old_box, +1, U, sumU, sumU2);
                 }
-                undo_move(logic_blocks_table, name2idx, array2D, chg);
+                undo_move(logic_blocks_table, grid, chg);
             }
         }
+        
 
-        // 動態調整 region prob
         double acceptance_rate = (double)accepted_moves / (double)iter_per_T;
 
-        if (acceptance_rate > 0.85)
-        {
-            current_region_prob -= prob_step_down;
-        }
-        else if (acceptance_rate > 0.6)
-        {
-            current_region_prob += prob_step_up;
-        }
-        else if (acceptance_rate > 0.15)
-        {
-            current_region_prob += prob_step_up;
-        }
-        else
-        {
-            current_region_prob -= prob_step_down;
-        }
-        if (current_region_prob < min_region_prob)
-            current_region_prob = min_region_prob;
-        if (current_region_prob > max_region_prob)
-            current_region_prob = max_region_prob;
-
-        // 溫度更新
-        double alpha;
-        if (time_ratio > 0.9)
-            alpha = 0.5;
-        else if (time_ratio > 0.6)
-            alpha = 0.82;
-        else
-        {
-            if (acceptance_rate > 0.9)
-                alpha = 0.7;
-            else if (acceptance_rate > 0.7)
-                alpha = 0.85;
-            else if (acceptance_rate < 0.15)
-                alpha = 0.95;
-            else
-                alpha = 0.9;
-        }
-        T *= alpha;
-
-        // moves / T 動態
         if (acceptance_rate > 0.9)
         {
             int nm = (int)(iter_per_T * 0.9);
@@ -752,11 +653,32 @@ void SA(vector<logic_info> &logic_blocks_table,
             iter_per_T = min(nm, 60000);
         }
 
+        if (acceptance_rate > 0.85) {
+            current_region_prob -= prob_step_down;
+        } else if (acceptance_rate > 0.6) {
+            current_region_prob += prob_step_up;
+        } else if (acceptance_rate > 0.15) {
+            current_region_prob += prob_step_up;
+        } else {
+            current_region_prob -= prob_step_down;
+        }
+        if (current_region_prob < min_region_prob) current_region_prob = min_region_prob;
+        if (current_region_prob > max_region_prob) current_region_prob = max_region_prob;
+
+        double alpha;
+        if (time_ratio > 0.9)       alpha = 0.5;
+        else if (time_ratio > 0.6)  alpha = 0.82;
+        else {
+            if      (acceptance_rate > 0.9)  alpha = 0.7;
+            else if (acceptance_rate > 0.7)  alpha = 0.85;
+            else if (acceptance_rate < 0.15) alpha = 0.95;
+            else                             alpha = 0.9;
+        }
+        T *= alpha;
+
         round_cnt++;
-        if (acceptance_rate < 0.02)
-            low_acc_rounds++;
-        else
-            low_acc_rounds = 0;
+        if (acceptance_rate < 0.02) low_acc_rounds++;
+        else low_acc_rounds = 0;
         if (low_acc_rounds >= 6)
         {
             cerr << "[SA] Early stop due to very low acceptance.\n";
@@ -769,15 +691,15 @@ void SA(vector<logic_info> &logic_blocks_table,
              << " HPWL=" << best_hpwl
              << " CC=" << best_CC
              << " Lam=" << lambda
+             << " Iter/T=" << iter_per_T
              << " Time=" << time_ratio << endl;
     }
 
     logic_blocks_table = best_logic_blocks;
-    array2D = best_array2D;
-    total_hpwl = best_hpwl;
-    CC = best_CC;
+    grid              = best_grid;
+    total_hpwl        = best_hpwl;
+    CC                = best_CC;
 
-    // 重新算一次，確保狀態一致
     compute_hpwl_cong(logic_blocks_table, pin_table, net_table, U, net_cost, total_hpwl, CC);
 }
 
@@ -796,6 +718,11 @@ void parse_input(ifstream &parse,
     info >> logic_block_R >> logic_block_C >> num_logic_blocks >> num_io_pins >> num_nets;
     R = logic_block_R;
     C = logic_block_C;
+
+    logic_blocks_table.reserve(num_logic_blocks);
+    pin_table.reserve(num_io_pins);
+    net_table.reserve(num_nets);
+
     for (int i = 0; i < num_logic_blocks; i++)
     {
         string name;
@@ -803,9 +730,7 @@ void parse_input(ifstream &parse,
         istringstream logic_inf(line);
         logic_inf >> name;
         logic_info inst;
-        inst.name = name;
-        inst.x = 0;
-        inst.y = 0;
+        inst.name = name; inst.x = 0; inst.y = 0;
         logic_blocks_table.push_back(inst);
         name2idx.insert({name, i});
     }
@@ -817,9 +742,7 @@ void parse_input(ifstream &parse,
         istringstream pin_inf(line);
         pin_inf >> name >> x >> y;
         pin_info inst;
-        inst.name = name;
-        inst.x = x;
-        inst.y = y;
+        inst.name = name; inst.x = x; inst.y = y;
         pin_table.push_back(inst);
         pin2idx.insert({name, i});
     }
@@ -831,8 +754,10 @@ void parse_input(ifstream &parse,
         istringstream net_inf(line);
         net_inf >> name >> degree;
         net_info inst;
-        inst.name = name;
-        inst.degree = degree;
+        inst.name = name; inst.degree = degree;
+
+        inst.connections.reserve(degree);
+        inst.terms.reserve(degree);
 
         for (int j = 0; j < degree; j++)
         {
@@ -912,18 +837,17 @@ int main(int argc, char *argv[])
     parse_input(parse_in, logic_blocks_table, pin_table, net_table,
                 name2idx, pin2idx, net2idx);
 
-    vector<vector<string>> array2D(R, vector<string>(C, "none"));
+    vector<vector<int>> grid(R, vector<int>(C, -1));
     vector<vector<int>> U(R, vector<int>(C, 0));
     vector<net_hpwl_cong> net_cost(net_table.size());
 
-    initial_place(array2D, R, C, logic_blocks_table);
+    initial_place(grid, R, C, logic_blocks_table);
 
     compute_hpwl_cong(logic_blocks_table, pin_table, net_table,
                       U, net_cost, total_hpwl, CC);
 
-    SA(logic_blocks_table, array2D,
+    SA(logic_blocks_table, grid,
        pin_table, net_table,
-       name2idx, pin2idx,
        net_cost, U,
        total_hpwl, CC);
 
