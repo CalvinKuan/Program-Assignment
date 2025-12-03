@@ -215,6 +215,9 @@ void compute_hpwl_cong(const vector<logic_info> &logic_blocks_table,
 double compute_cost(double total_hpwl, double CC, double lambda)
 {
     (void)lambda; // 用不到 lambda，目前 cost = HPWL * CC
+    if(CC<1.05){
+        return total_hpwl*1.05;
+    }
     return total_hpwl * CC;
 }
 
